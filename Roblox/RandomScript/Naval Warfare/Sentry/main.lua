@@ -24,7 +24,7 @@ local KNOWN_SPEEDS = { ["large bomber"]=105, ["largebomber"]=105, ["bomber"]=115
 -- WARNING SOUND CONFIG (added)
 local WARNING_INTERVAL = 1.5
 local lastWarningTime = 0
-local isInOrange = false -- edge-state: true when currently inside orange tier
+local isInDanger = false -- true when currently inside danger zone (dist < TIER_ORANGE)
 
 -- STATE
 local enabled = false
@@ -528,7 +528,7 @@ local function startLock()
             currentTarget = nil
             if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
             aiLabel.Visible = false; dangerLabel.Visible = false
-            isInOrange = false
+            isInDanger = false
             return
         end
 
@@ -541,7 +541,7 @@ local function startLock()
             currentTarget = nil
             if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
             aiLabel.Visible = false; dangerLabel.Visible = false
-            isInOrange = false
+            isInDanger = false
             return
         end
 
@@ -583,20 +583,20 @@ local function startLock()
                 cam.CFrame = CFrame.lookAt(origin, aimPoint)
 
                 distLabel.Text = string.format("Enemy distance: %.1f studs", distVal)
-                -- play warning sound if in anti-air mode and orange tier (edge-triggered + repeat)
+                -- play warning sound if in anti-air mode and inside danger zone (dist < TIER_ORANGE)
                 local _, tier = colorForDistance(distVal)
-                if mode == "Anti-air" and enabled and tier == "mid" then
+                if mode == "Anti-air" and enabled and distVal < TIER_ORANGE then
                     local now = tick()
-                    if not isInOrange then
-                        -- just entered orange zone: play immediately and start timer
-                        isInOrange = true
+                    if not isInDanger then
+                        -- just entered danger zone: play immediately and start timer
+                        isInDanger = true
                         lastWarningTime = now
                         pcall(function()
                             warnSound:Stop()
                             warnSound:Play()
                         end)
                     else
-                        -- already in orange: repeat every WARNING_INTERVAL
+                        -- already in danger: repeat every WARNING_INTERVAL
                         if now - lastWarningTime >= WARNING_INTERVAL then
                             lastWarningTime = now
                             pcall(function()
@@ -606,8 +606,8 @@ local function startLock()
                         end
                     end
                 else
-                    -- not in orange (or not anti-air) -> reset edge state
-                    isInOrange = false
+                    -- not in danger (or not anti-air) -> reset edge state
+                    isInDanger = false
                 end
 
                 setHighlightsIfNeeded(currentTarget, distVal)
@@ -617,7 +617,7 @@ local function startLock()
                 clearCharHighlight(); clearVehicleHighlights()
                 if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
                 aiLabel.Visible = false; dangerLabel.Visible = false
-                isInOrange = false
+                isInDanger = false
             end
         end
 
@@ -626,7 +626,7 @@ local function startLock()
         clearCharHighlight(); clearVehicleHighlights()
         if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
         aiLabel.Visible = false; dangerLabel.Visible = false
-        isInOrange = false
+        isInDanger = false
     end)
 end
 
@@ -640,7 +640,7 @@ local function stopLock()
     pcall(function() player.CameraMode = originalCameraMode or Enum.CameraMode.Classic end)
     cam.CameraType = Enum.CameraType.Custom
     distLabel.Text = "Enemy distance: N/A"
-    isInOrange = false
+    isInDanger = false
 end
 
 -- main toggle
