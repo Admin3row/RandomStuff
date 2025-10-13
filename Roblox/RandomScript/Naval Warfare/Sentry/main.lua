@@ -1,4 +1,4 @@
--- AutoLock (fixed): default = General, mode toggle works while running, AI label updates live
+-- AutoLock (final): added Critical Danger sound + Predictive Lock sound
 -- Place in StarterPlayer -> StarterPlayerScripts
 
 local Players = game:GetService("Players")
@@ -21,10 +21,22 @@ local PLANE_EXACT = { ["Bomber"]=true, ["Large Bomber"]=true, ["Torpedo Bomber"]
 local PLANE_FALLBACK_TOKENS = { "bomber","largebomber","large bomber","torpedobomber","torpedo bomber","plane","aircraft" }
 local KNOWN_SPEEDS = { ["large bomber"]=105, ["largebomber"]=105, ["bomber"]=115, ["torpedo bomber"]=115, ["torpedobomber"]=115 }
 
--- WARNING SOUND CONFIG (added)
+-- WARNING SOUND CONFIG (orange)
 local WARNING_INTERVAL = 1.5
 local lastWarningTime = 0
 local isInDanger = false -- true when currently inside danger zone (dist < TIER_ORANGE)
+
+-- CRITICAL DANGER CONFIG (under 700)
+-- This will loop until we leave critical zone
+local CRITICAL_SOUND_ID = "rbxassetid://95303400990791"
+local CRITICAL_VOLUME = 1
+local isInCritical = false
+
+-- PREDICTIVE LOCK SOUND CONFIG
+local PREDICTIVE_SOUND_ID = "rbxassetid://98846874631020"
+local PREDICTIVE_VOLUME = 1.5
+local lastPredicting = false
+local lastPredictTarget = nil
 
 -- STATE
 local enabled = false
@@ -32,7 +44,7 @@ local lockConn = nil
 local aimCenterConn = nil
 local currentTarget = nil
 local originalCameraMode = player.CameraMode
-local mode = "General" -- << default fixed to General
+local mode = "General" -- default
 
 -- caches
 local charHighlight, vehicleHighlightModel
@@ -361,7 +373,7 @@ pcall(function()
     aiLabel.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
 end)
 
--- WARNING SOUND (added)
+-- WARNING SOUND (orange)
 local warnSound = Instance.new("Sound")
 warnSound.Name = "AutoLockWarning"
 warnSound.SoundId = "rbxassetid://18645445371"
@@ -369,6 +381,24 @@ warnSound.Volume = 2 -- 200%
 warnSound.Looped = false
 warnSound.PlayOnRemove = false
 warnSound.Parent = screenGui
+
+-- CRITICAL SOUND (looped)
+local criticalSound = Instance.new("Sound")
+criticalSound.Name = "AutoLockCritical"
+criticalSound.SoundId = CRITICAL_SOUND_ID
+criticalSound.Volume = CRITICAL_VOLUME
+criticalSound.Looped = true
+criticalSound.PlayOnRemove = false
+criticalSound.Parent = screenGui
+
+-- PREDICTIVE SOUND
+local predictiveSound = Instance.new("Sound")
+predictiveSound.Name = "AutoLockPredictive"
+predictiveSound.SoundId = PREDICTIVE_SOUND_ID
+predictiveSound.Volume = PREDICTIVE_VOLUME
+predictiveSound.Looped = false
+predictiveSound.PlayOnRemove = false
+predictiveSound.Parent = screenGui
 
 -- dragging: modeBtn follows exactly (offset +80)
 local draggingBtn = false
@@ -529,6 +559,9 @@ local function startLock()
             if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
             aiLabel.Visible = false; dangerLabel.Visible = false
             isInDanger = false
+            isInCritical = false
+            lastPredicting = false
+            lastPredictTarget = nil
             return
         end
 
@@ -542,6 +575,9 @@ local function startLock()
             if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
             aiLabel.Visible = false; dangerLabel.Visible = false
             isInDanger = false
+            isInCritical = false
+            lastPredicting = false
+            lastPredictTarget = nil
             return
         end
 
@@ -560,6 +596,27 @@ local function startLock()
                 if mode == "Anti-air" and inPlane and distVal <= PREDICTIVE_RANGE then shouldPredict = true end
                 if mode == "General" and distVal <= PREDICTIVE_RANGE then shouldPredict = true end
 
+                -- PREDICTIVE SOUND logic:
+                -- play when we start predicting for current target OR when we switch target inside PREDICTIVE_RANGE
+                if shouldPredict then
+                    -- if we switched target and the new target is inside PREDICTIVE_RANGE -> play
+                    if currentTarget ~= lastPredictTarget and distVal <= PREDICTIVE_RANGE then
+                        pcall(function()
+                            predictiveSound:Stop()
+                            predictiveSound:Play()
+                        end)
+                    else
+                        -- if we just started predicting for the same target (lastPredicting == false -> true) -> play
+                        if not lastPredicting then
+                            pcall(function()
+                                predictiveSound:Stop()
+                                predictiveSound:Play()
+                            end)
+                        end
+                    end
+                end
+
+                -- compute predicted aim if applicable
                 if shouldPredict then
                     local targetVel, fallbackSpeed = getTargetVelocityAndFallbackSpeed(currentTarget)
                     if targetVel.Magnitude < 0.5 and fallbackSpeed then
@@ -579,12 +636,16 @@ local function startLock()
                     end
                 end
 
+                -- update lastPredicting/lastPredictTarget AFTER we've potentially played sound
+                lastPredicting = shouldPredict
+                lastPredictTarget = currentTarget
+
                 cam.CameraType = Enum.CameraType.Scriptable
                 cam.CFrame = CFrame.lookAt(origin, aimPoint)
 
                 distLabel.Text = string.format("Enemy distance: %.1f studs", distVal)
-                -- play warning sound if in anti-air mode and inside danger zone (dist < TIER_ORANGE)
-                local _, tier = colorForDistance(distVal)
+
+                -- ORANGE warning sound (dist < TIER_ORANGE) -> edge-triggered + repeat every WARNING_INTERVAL
                 if mode == "Anti-air" and enabled and distVal < TIER_ORANGE then
                     local now = tick()
                     if not isInDanger then
@@ -606,27 +667,61 @@ local function startLock()
                         end
                     end
                 else
-                    -- not in danger (or not anti-air) -> reset edge state
                     isInDanger = false
+                end
+
+                -- CRITICAL sound (dist < TIER_CLOSE) -> start loop immediately, stop when leaving critical
+                if mode == "Anti-air" and enabled and distVal < TIER_CLOSE then
+                    if not isInCritical then
+                        isInCritical = true
+                        pcall(function()
+                            criticalSound:Stop()
+                            criticalSound:Play() -- looped true => will repeat immediately after finish
+                        end)
+                    else
+                        -- ensure it's playing (in case it stopped unexpectedly)
+                        if criticalSound.IsPlaying == false then
+                            pcall(function() criticalSound:Play() end)
+                        end
+                    end
+                else
+                    if isInCritical then
+                        isInCritical = false
+                        pcall(function() criticalSound:Stop() end)
+                    end
                 end
 
                 setHighlightsIfNeeded(currentTarget, distVal)
                 return
             else
+                -- target invalid
                 currentTarget = nil
                 clearCharHighlight(); clearVehicleHighlights()
                 if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
                 aiLabel.Visible = false; dangerLabel.Visible = false
                 isInDanger = false
+                if isInCritical then
+                    isInCritical = false
+                    pcall(function() criticalSound:Stop() end)
+                end
+                lastPredicting = false
+                lastPredictTarget = nil
             end
         end
 
+        -- no current target
         cam.CameraType = Enum.CameraType.Custom
         distLabel.Text = "Enemy distance: N/A"; vehicleLabel.Text = "Vehicle: N/A"
         clearCharHighlight(); clearVehicleHighlights()
         if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
         aiLabel.Visible = false; dangerLabel.Visible = false
         isInDanger = false
+        if isInCritical then
+            isInCritical = false
+            pcall(function() criticalSound:Stop() end)
+        end
+        lastPredicting = false
+        lastPredictTarget = nil
     end)
 end
 
@@ -641,6 +736,12 @@ local function stopLock()
     cam.CameraType = Enum.CameraType.Custom
     distLabel.Text = "Enemy distance: N/A"
     isInDanger = false
+    if isInCritical then
+        isInCritical = false
+        pcall(function() criticalSound:Stop() end)
+    end
+    lastPredicting = false
+    lastPredictTarget = nil
 end
 
 -- main toggle
