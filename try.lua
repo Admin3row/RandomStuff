@@ -951,8 +951,10 @@ local function startLock()
                     if isInCritical then isInCritical = false; pcall(function() criticalSound:Stop() end) end
                 end
 
+                -- end of target processing inside RenderStepped
                 return
             else
+                -- target invalid: clear and continue
                 currentTarget = nil
                 clearCharHighlight(); clearVehicleHighlights()
                 if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
@@ -964,9 +966,13 @@ local function startLock()
             end
         end
 
-        -- no target
+        -- no target: reset camera & UI
         cam.CameraType = Enum.CameraType.Custom
-        pcall(function() distLabel.Text = "Enemy distance: N/A"; vehicleLabel.Text = "Vehicle: N/A | HP: N/A"; velocityLabel.Text = "Velocity: N/A" end)
+        pcall(function()
+            distLabel.Text = "Enemy distance: N/A"
+            vehicleLabel.Text = "Vehicle: N/A | HP: N/A"
+            velocityLabel.Text = "Velocity: N/A"
+        end)
         clearCharHighlight(); clearVehicleHighlights()
         if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
         aiLabel.Visible = false; dangerLabel.Visible = false
@@ -974,15 +980,27 @@ local function startLock()
         if isInCritical then isInCritical = false; pcall(function() criticalSound:Stop() end) end
         lastPredicting = false
         lastPredictTarget = nil
-    end)
-end
+    end) -- end RunService.RenderStepped:Connect
 
+end -- end function startLock
+
+-- stopLock function
 local function stopLock()
-    if lockConn then lockConn:Disconnect(); lockConn = nil end
-    enabled = false; currentTarget = nil; updateButtonVisual()
+    if lockConn then
+        lockConn:Disconnect()
+        lockConn = nil
+    end
+    enabled = false
+    currentTarget = nil
+    updateButtonVisual()
     clearCharHighlight(); clearVehicleHighlights()
     pcall(function() vehicleLabel.Text = "Vehicle: N/A | HP: N/A" end)
-    if crosshair then pcall(function() crosshair.ImageTransparency = 0.6 crosshair.ImageColor3 = Color3.new(1,1,1) end) end
+    if crosshair then
+        pcall(function()
+            crosshair.ImageTransparency = 0.6
+            crosshair.ImageColor3 = Color3.new(1,1,1)
+        end)
+    end
     aiLabel.Visible = false; dangerLabel.Visible = false
     pcall(function() player.CameraMode = originalCameraMode or Enum.CameraMode.Classic end)
     cam.CameraType = Enum.CameraType.Custom
@@ -993,12 +1011,16 @@ local function stopLock()
     lastPredictTarget = nil
 end
 
--- toggle
+-- toggle button
 toggleBtn.MouseButton1Click:Connect(function()
-    if enabled then stopLock() else startLock() end
+    if enabled then
+        stopLock()
+    else
+        startLock()
+    end
 end)
 
--- respawn
+-- respawn handling
 player.CharacterAdded:Connect(function()
     task.wait(0.05)
     refreshCrosshair()
@@ -1010,10 +1032,19 @@ player.CharacterAdded:Connect(function()
     end
 end)
 
-Players.PlayerRemoving:Connect(function(rem) if rem == player then stopLock() end end)
+-- cleanup on leaving
+Players.PlayerRemoving:Connect(function(rem)
+    if rem == player then
+        stopLock()
+    end
+end)
 
--- init
+-- init UI state
 refreshCrosshair()
 updateButtonVisual()
 aiLabel.Text = "Sentry Mode: " .. mode
-pcall(function() aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0) or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0)) end)
+pcall(function()
+    aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0)
+        or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0))
+end)
+
