@@ -1,41 +1,30 @@
--- Sentry AutoLock LocalScript
--- Paste this as a LocalScript in StarterPlayerScripts
+-- Sentry Auto-Lock (fresh rewrite)
+-- Place this LocalScript in StarterPlayer -> StarterPlayerScripts
 
-local Players        = game:GetService("Players")
-local RunService     = game:GetService("RunService")
-local UIS            = game:GetService("UserInputService")
-local Workspace      = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
-local player         = Players.LocalPlayer
-local playerGui      = player:WaitForChild("PlayerGui")
-local cam            = Workspace.CurrentCamera
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local cam = Workspace.CurrentCamera
 
--- CONFIG
-local UI_WIDTH       = 160
-local X_OFFSET       = 20
-local Y_OFFSET       = 120
-
-local MODE_CONFIG = {
-    ["Anti-air"] = { TIER_ORANGE = 2500, PREDICTIVE_RANGE = 2200, TIER_CLOSE = 700, CRITICAL_SOUND = true },
-    ["Anti-ship"] = { TIER_ORANGE = 2700, PREDICTIVE_RANGE = 2500, TIER_CLOSE = 1000, CRITICAL_SOUND = false },
-    ["General"] = { TIER_ORANGE = 2000, PREDICTIVE_RANGE = 1800, TIER_CLOSE = 700, CRITICAL_SOUND = false },
-}
-
+-- CONFIG (confirmed)
 local INFANTRY_RANGE = 300
 local VEH_PART_HIGHLIGHT_LIMIT = 10
-local WARNING_INTERVAL = 1.5
-local MAX_CACHE_DISTANCE = 2500
-local SMOOTH_ALPHA = 0.35
 
-local KNOWN_SPEEDS = {
-    ["large bomber"] = 105,
-    ["largebomber"] = 105,
-    ["bomber"] = 115,
-    ["torpedo bomber"] = 115,
-    ["torpedobomber"] = 115,
+local MODE_CONFIG = {
+    ["Anti-air"] = { TIER_ORANGE = 2500, PREDICTIVE_RANGE = 2200, TIER_CLOSE = 700, CRITICAL_SOUND = true, DEFAULT_PROJECTILE_SPEED = 800 },
+    ["Anti-ship"] = { TIER_ORANGE = 2700, PREDICTIVE_RANGE = 2500, TIER_CLOSE = 1000, CRITICAL_SOUND = false, DEFAULT_PROJECTILE_SPEED = 821 },
+    ["General"] = { TIER_ORANGE = 2000, PREDICTIVE_RANGE = 1800, TIER_CLOSE = 700, CRITICAL_SOUND = false, DEFAULT_PROJECTILE_SPEED = 800 },
 }
 
-local SHIP_EXACT = { ["Battleship"]=true, ["Carrier"]=true, ["Destroyer"]=true, ["Cruiser"]=true, ["Heavy Cruiser"]=true }
+local PLANE_EXACT = { ["Bomber"] = true, ["Large Bomber"] = true, ["Torpedo Bomber"] = true }
+local PLANE_FALLBACK_TOKENS = { "bomber", "plane", "aircraft", "torpedo" }
+local KNOWN_SPEEDS = { ["large bomber"] = 105, ["largebomber"] = 105, ["bomber"] = 115, ["torpedo bomber"] = 115, ["torpedobomber"] = 115 }
+
+local SHIP_EXACT = { ["Battleship"] = true, ["Carrier"] = true, ["Destroyer"] = true, ["Cruiser"] = true, ["Heavy Cruiser"] = true }
 local SHIP_PRIORITY_ORDER = { "N/A", "Battleship", "Carrier", "Destroyer", "Cruiser", "Heavy Cruiser" }
 
 local BULLET_TYPES = {
@@ -43,25 +32,30 @@ local BULLET_TYPES = {
     Normal     = { Speed = 821, Mass = 1.792, AntiGravityForce = 292.992 },
 }
 
-local WARNING_SOUND_ID     = "rbxassetid://18645445371"
-local PREDICTIVE_SOUND_ID  = "rbxassetid://98846874631020"
-local CRITICAL_SOUND_ID    = "rbxassetid://95303400990791"
+local WARNING_SOUND_ID = "rbxassetid://18645445371"
+local PREDICTIVE_SOUND_ID = "rbxassetid://98846874631020"
+local CRITICAL_SOUND_ID = "rbxassetid://95303400990791"
+local WARNING_INTERVAL = 1.5
+local CRITICAL_VOLUME = 1
+local PREDICTIVE_VOLUME = 1.5
 
 -- STATE
 local enabled = false
 local lockConn = nil
 local currentTarget = nil
 local originalCameraMode = player.CameraMode
-local mode = "Anti-air" -- default
+local mode = "Anti-air" -- default as requested
 local priorityIndex = 1
 local bulletTypeName = "Battleship"
 
+-- caches / helpers
 local positionCache = {}
-local charHighlight = nil
-local vehicleHighlightModel = nil
+local SMOOTH_ALPHA = 0.35
+local MAX_CACHE_DISTANCE = 3000
+
+local charHighlight, vehicleHighlightModel
 local vehiclePartHighlights = {}
-local lastColorTier = nil
-local lastTarget = nil
+local lastColorTier, lastTarget = nil, nil
 
 local isInDanger = false
 local lastWarningTime = 0
@@ -69,11 +63,11 @@ local isInCritical = false
 local lastPredicting = false
 local lastPredictTarget = nil
 
-local crosshair = nil
+local crosshair
 
--- UI helpers
+-- UTIL: find Aim image anywhere in PlayerGui
 local function findAimInPlayerGui()
-    for _,inst in ipairs(playerGui:GetDescendants()) do
+    for _, inst in ipairs(playerGui:GetDescendants()) do
         if inst.Name == "Aim" and (inst:IsA("ImageLabel") or inst:IsA("ImageButton")) then
             return inst
         end
@@ -84,8 +78,8 @@ end
 local function centerCrosshair(inst)
     if not inst then return end
     pcall(function()
-        inst.AnchorPoint = Vector2.new(0.5,0.5)
-        inst.Position = UDim2.new(0.5,0,0.5,0)
+        inst.AnchorPoint = Vector2.new(0.5, 0.5)
+        inst.Position = UDim2.new(0.5, 0, 0.5, 0)
     end)
 end
 
@@ -97,11 +91,11 @@ local function refreshCrosshair()
     end
 end
 
+-- Force center every frame (keeps it stable)
 RunService.RenderStepped:Connect(function()
     if not crosshair then refreshCrosshair() end
     if crosshair then pcall(function() crosshair.AnchorPoint = Vector2.new(0.5,0.5); crosshair.Position = UDim2.new(0.5,0,0.5,0) end) end
 end)
-
 playerGui.DescendantAdded:Connect(function(desc)
     if desc.Name == "Aim" and (desc:IsA("ImageLabel") or desc:IsA("ImageButton")) then
         crosshair = desc; centerCrosshair(crosshair)
@@ -109,7 +103,43 @@ playerGui.DescendantAdded:Connect(function(desc)
     end
 end)
 
--- position / vehicle helpers
+-- position cache for smoothing velocity
+local function updatePositionCache(origin)
+    local now = tick()
+    for _,plr in ipairs(Players:GetPlayers()) do
+        local ch = plr.Character
+        if ch then
+            local pos = nil
+            pcall(function() pos = (ch:FindFirstChild("Head") and ch.Head.Position) or (ch:FindFirstChild("HumanoidRootPart") and ch.HumanoidRootPart.Position) end)
+            if pos then
+                local d = (pos - origin).Magnitude
+                if d <= MAX_CACHE_DISTANCE then
+                    local prev = positionCache[plr]
+                    if prev and prev.pos and prev.time and now - prev.time > 0 then
+                        local dt = math.max(1e-4, now - prev.time)
+                        local rawVel = (pos - prev.pos) / dt
+                        if prev.vel then
+                            local sm = prev.vel * (1 - SMOOTH_ALPHA) + rawVel * SMOOTH_ALPHA
+                            positionCache[plr] = { pos = pos, time = now, vel = sm }
+                        else
+                            positionCache[plr] = { pos = pos, time = now, vel = rawVel }
+                        end
+                    else
+                        positionCache[plr] = { pos = pos, time = now, vel = Vector3.new(0,0,0) }
+                    end
+                else
+                    positionCache[plr] = nil
+                end
+            else
+                positionCache[plr] = nil
+            end
+        else
+            positionCache[plr] = nil
+        end
+    end
+end
+
+-- basic helpers
 local function getCharacterHeadPos(ch)
     if not ch then return nil end
     local head = ch:FindFirstChild("Head")
@@ -135,79 +165,60 @@ local function isPlayerSeated(plr)
     return true, getVehicleModelFromSeat(seat)
 end
 
-local PLANE_EXACT = { ["Bomber"]=true, ["Large Bomber"]=true, ["Torpedo Bomber"]=true }
-local PLANE_FALLBACK_TOKENS = { "bomber","plane","aircraft","torpedo" }
-
-local function isPlayerInPlane(plr)
-    if not plr or not plr.Character then return false, nil, false end
-    local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-    if not hum then return false, nil, false end
-    local seat = hum.SeatPart
-    if not seat then return false, nil, false end
-    local vehicle = getVehicleModelFromSeat(seat)
-    if not vehicle then return false, nil, false end
-    local ok, nm = pcall(function() return tostring(vehicle.Name or "") end)
-    nm = (ok and nm) or ""
-    if nm ~= "" then
-        if PLANE_EXACT[nm] then return true, vehicle, true end
-        local lower = string.lower(nm)
-        for _,tok in ipairs(PLANE_FALLBACK_TOKENS) do
-            if string.find(lower, tok, 1, true) then return true, vehicle, false end
-        end
+local function nameIsPlane(vehicle)
+    if not vehicle then return false end
+    local okName, nm = pcall(function() return tostring(vehicle.Name or "") end)
+    nm = (okName and nm) or ""
+    if PLANE_EXACT[nm] then return true end
+    local lower = string.lower(nm)
+    for _,tok in ipairs(PLANE_FALLBACK_TOKENS) do
+        if string.find(lower, tok, 1, true) then return true end
     end
     local okType, typeVal = pcall(function() return vehicle:FindFirstChild("VehicleType") end)
     if okType and typeVal and typeVal:IsA("StringValue") then
         local v = tostring(typeVal.Value or "")
-        if PLANE_EXACT[v] then return true, vehicle, true end
+        if PLANE_EXACT[v] then return true end
         local lv = string.lower(v)
         for _,tok in ipairs(PLANE_FALLBACK_TOKENS) do
-            if string.find(lv, tok, 1, true) then return true, vehicle, false end
+            if string.find(lv, tok, 1, true) then return true end
         end
     end
-    if vehicle.GetAttribute then
-        local okAttr, attr = pcall(function() return vehicle:GetAttribute("VehicleType") end)
-        if okAttr and type(attr) == "string" then
-            if PLANE_EXACT[attr] then return true, vehicle, true end
-            local la = string.lower(attr)
-            for _,tok in ipairs(PLANE_FALLBACK_TOKENS) do
-                if string.find(la, tok, 1, true) then return true, vehicle, false end
-            end
+    local okAttr, attr = pcall(function() return vehicle.GetAttribute and vehicle:GetAttribute("VehicleType") end)
+    if okAttr and type(attr) == "string" then
+        if PLANE_EXACT[attr] then return true end
+        local la = string.lower(attr)
+        for _,tok in ipairs(PLANE_FALLBACK_TOKENS) do
+            if string.find(la, tok, 1, true) then return true end
         end
     end
-    return false, vehicle, false
+    return false
 end
 
 local function isShipExact(vehicle)
     if not vehicle then return false end
-    local ok, nm = pcall(function() return tostring(vehicle.Name or "") end)
-    nm = (ok and nm) or ""
+    local okName, nm = pcall(function() return tostring(vehicle.Name or "") end)
+    nm = (okName and nm) or ""
     if SHIP_EXACT[nm] then return true end
     local okType, typeVal = pcall(function() return vehicle:FindFirstChild("VehicleType") end)
-    if okType and typeVal and typeVal:IsA("StringValue") then
-        local v = tostring(typeVal.Value or "")
-        if SHIP_EXACT[v] then return true end
-    end
-    if vehicle.GetAttribute then
-        local okAttr, attr = pcall(function() return vehicle:GetAttribute("VehicleType") end)
-        if okAttr and type(attr) == "string" and SHIP_EXACT[attr] then return true end
-    end
+    if okType and typeVal and typeVal:IsA("StringValue") and SHIP_EXACT[typeVal.Value] then return true end
+    local okAttr, attr = pcall(function() return vehicle.GetAttribute and vehicle:GetAttribute("VehicleType") end)
+    if okAttr and type(attr) == "string" and SHIP_EXACT[attr] then return true end
     return false
 end
 
 local function isVehicleDead(vehicle)
     if not vehicle then return false, nil end
-    local hpObj = vehicle:FindFirstChild("HP")
-    if hpObj and (hpObj:IsA("IntValue") or hpObj:IsA("NumberValue")) then
+    local okHP, hpObj = pcall(function() return vehicle:FindFirstChild("HP") end)
+    if okHP and hpObj and (hpObj:IsA("IntValue") or hpObj:IsA("NumberValue")) then
         return hpObj.Value <= 0, hpObj.Value
     end
-    local ok, attr = pcall(function() return vehicle:GetAttribute("HP") end)
-    if ok and type(attr) == "number" then
+    local okAttr, attr = pcall(function() return vehicle.GetAttribute and vehicle:GetAttribute("HP") end)
+    if okAttr and type(attr) == "number" then
         return attr <= 0, attr
     end
     return false, nil
 end
 
--- target selection and validity
 local function validTargetGeneral(p)
     if not p or p == player then return false end
     if p.Team == player.Team then return false end
@@ -217,12 +228,13 @@ local function validTargetGeneral(p)
     if not hum or hum.Health <= 0 then return false end
     local seated, vehicle = isPlayerSeated(p)
     if seated and vehicle then
-        local dead, _ = isVehicleDead(vehicle)
+        local dead, hpv = isVehicleDead(vehicle)
         if dead then return false end
     end
     return true
 end
 
+-- NEAREST selection functions
 local function nearestEnemy(origin)
     local nearest, bestDist = nil, math.huge
     for _,plr in ipairs(Players:GetPlayers()) do
@@ -248,10 +260,13 @@ local function nearestAntiAirTarget(origin)
                     local headPos = getCharacterHeadPos(ch)
                     if headPos then
                         local dist = (headPos - origin).Magnitude
-                        local inPlane, vehicleModel = isPlayerInPlane(plr)
+                        local inPlane = false
+                        local vehicleModel = nil
+                        local ok, a, b = pcall(function() return isPlayerSeated(plr) end)
+                        if ok then inPlane, vehicleModel = isPlayerSeated(plr) end
                         local eligible = false
-                        if inPlane then
-                            local dead, _ = isVehicleDead(vehicleModel)
+                        if inPlane and vehicleModel and nameIsPlane(vehicleModel) then
+                            local dead, hpv = isVehicleDead(vehicleModel)
                             if not dead then eligible = true end
                         else
                             if dist <= INFANTRY_RANGE then eligible = true end
@@ -265,43 +280,19 @@ local function nearestAntiAirTarget(origin)
     return nearest, bestDist
 end
 
-local function nearestEnemyWithVehicleHP(origin)
-    local nearest, bestDist = nil, math.huge
-    for _,plr in ipairs(Players:GetPlayers()) do
-        if plr ~= player and plr.Team ~= player.Team then
-            local ch = plr.Character
-            if ch then
-                local hum = ch:FindFirstChildOfClass("Humanoid")
-                if hum and hum.Health > 0 then
-                    local pos = getCharacterHeadPos(ch)
-                    if pos then
-                        local seated, vehicle = isPlayerSeated(plr)
-                        if seated and vehicle then
-                            local dead, _ = isVehicleDead(vehicle)
-                            if dead then goto continue_gen end
-                        end
-                        local d = (pos - origin).Magnitude
-                        if d < bestDist then bestDist, nearest = d, plr end
-                    end
-                end
-            end
-        end
-        ::continue_gen::
-    end
-    return nearest, bestDist
-end
-
 local function nearestAntiShipTarget(origin)
-    local priority = SHIP_PRIORITY_ORDER[priorityIndex]
-    local searchTokens = {}
-    if priority ~= "N/A" then
-        table.insert(searchTokens, priority)
-        table.insert(searchTokens, "ANY")
+    -- priority: find closest ship matching priority; fallback to any ship
+    local priorityToken = SHIP_PRIORITY_ORDER[priorityIndex]
+    local searchModes = {}
+    if priorityToken ~= "N/A" then
+        table.insert(searchModes, priorityToken)
+        table.insert(searchModes, "ANY")
     else
-        table.insert(searchTokens, "ANY")
+        table.insert(searchModes, "ANY")
     end
-    for _,tok in ipairs(searchTokens) do
-        local found, localBestDist, localBest = false, math.huge, nil
+
+    for _,token in ipairs(searchModes) do
+        local found, localBest, localBestDist = false, nil, math.huge
         for _,plr in ipairs(Players:GetPlayers()) do
             if plr ~= player and plr.Team ~= player.Team then
                 local ch = plr.Character
@@ -312,9 +303,9 @@ local function nearestAntiShipTarget(origin)
                         if headPos then
                             local seated, vehicle = isPlayerSeated(plr)
                             if seated and vehicle and isShipExact(vehicle) then
-                                local dead, _ = isVehicleDead(vehicle)
+                                local dead, hpv = isVehicleDead(vehicle)
                                 if dead then goto continue_ship end
-                                local match = (tok == "ANY") or (tostring(vehicle.Name) == tok)
+                                local match = (token == "ANY") or (vehicle.Name == token)
                                 if match then
                                     local d = (headPos - origin).Magnitude
                                     if d < localBestDist then localBestDist, localBest = d, plr; found = true end
@@ -331,47 +322,33 @@ local function nearestAntiShipTarget(origin)
     return nil, math.huge
 end
 
--- position caching for velocity estimate
-local function updatePositionCache(origin)
-    local tNow = tick()
+local function nearestEnemyWithVehicleHP(origin)
+    local nearest, bestDist = nil, math.huge
     for _,plr in ipairs(Players:GetPlayers()) do
-        local ch = plr.Character
-        if ch then
-            local pos = nil
-            local ok, p = pcall(function() return getCharacterHeadPos(ch) end)
-            if ok then pos = p end
-            if not pos then
-                local hrp = ch:FindFirstChild("HumanoidRootPart")
-                if hrp then pos = hrp.Position end
-            end
-            if pos then
-                local dist = (pos - origin).Magnitude
-                if dist <= MAX_CACHE_DISTANCE then
-                    local prev = positionCache[plr]
-                    if prev and prev.pos and prev.time and tNow - prev.time > 0 then
-                        local dt = math.max(1e-4, tNow - prev.time)
-                        local rawVel = (pos - prev.pos) / dt
-                        if prev.vel then
-                            local sm = prev.vel * (1 - SMOOTH_ALPHA) + rawVel * SMOOTH_ALPHA
-                            positionCache[plr] = { pos = pos, time = tNow, vel = sm }
-                        else
-                            positionCache[plr] = { pos = pos, time = tNow, vel = rawVel }
+        if plr ~= player and plr.Team ~= player.Team then
+            local ch = plr.Character
+            if ch then
+                local hum = ch:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local pos = getCharacterHeadPos(ch)
+                    if pos then
+                        local seated, vehicle = isPlayerSeated(plr)
+                        if seated and vehicle then
+                            local dead, hpv = isVehicleDead(vehicle)
+                            if dead then goto continue_gen end
                         end
-                    else
-                        positionCache[plr] = { pos = pos, time = tNow, vel = Vector3.new(0,0,0) }
+                        local d = (pos - origin).Magnitude
+                        if d < bestDist then bestDist, nearest = d, plr end
                     end
-                else
-                    positionCache[plr] = nil
                 end
-            else
-                positionCache[plr] = nil
             end
-        else
-            positionCache[plr] = nil
         end
+        ::continue_gen::
     end
+    return nearest, bestDist
 end
 
+-- VELOCITY / fallback detection
 local function getTargetVelocityAndFallbackSpeed(targetPlayer)
     if not targetPlayer or not targetPlayer.Character then return Vector3.new(0,0,0), nil end
     local hum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
@@ -382,16 +359,14 @@ local function getTargetVelocityAndFallbackSpeed(targetPlayer)
             local vehicle = getVehicleModelFromSeat(seat)
             if vehicle then
                 local vel = nil
-                if vehicle.PrimaryPart then
-                    local ok, v = pcall(function() return vehicle.PrimaryPart.AssemblyLinearVelocity end)
-                    if ok and v then vel = v end
-                end
-                if (not vel or vel.Magnitude < 0.01) and seat and seat.AssemblyLinearVelocity then vel = seat.AssemblyLinearVelocity end
+                local okPrim, primVel = pcall(function() return vehicle.PrimaryPart and vehicle.PrimaryPart.AssemblyLinearVelocity end)
+                if okPrim and primVel then vel = primVel end
+                if (not vel or vel.Magnitude < 0.01) and seat.AssemblyLinearVelocity then vel = seat.AssemblyLinearVelocity end
                 if (not vel or vel.Magnitude < 0.01) then
                     for _,v in ipairs(vehicle:GetDescendants()) do
                         if v:IsA("BasePart") then
-                            local ok2, av = pcall(function() return v.AssemblyLinearVelocity end)
-                            if ok2 and av and av.Magnitude > 0.01 then vel = av; break end
+                            local okp, av = pcall(function() return v.AssemblyLinearVelocity end)
+                            if okp and av and av.Magnitude > 0.01 then vel = av; break end
                         end
                     end
                 end
@@ -419,7 +394,7 @@ local function getTargetVelocityAndFallbackSpeed(targetPlayer)
     return Vector3.new(0,0,0), nil
 end
 
--- intercept math (no gravity)
+-- INTERCEPT math (no gravity)
 local function computeInterceptPointNoGravity(origin, targetPos, targetVel, projectileSpeed)
     if not projectileSpeed or projectileSpeed <= 0 then return nil end
     local r = targetPos - origin
@@ -444,55 +419,57 @@ local function computeInterceptPointNoGravity(origin, targetPos, targetVel, proj
     elseif t2 > 0 then t = t2
     else return nil end
     if t and t > 10 then return nil end
-    return targetPos + targetVel * t
+    return targetPos + v * t
 end
 
--- intercept with gravity numeric search + bisection root find
+-- INTERCEPT math (with gravity vector). Uses stepping + bisection to find positive root.
 local function computeInterceptPointWithGravity(origin, targetPos, targetVel, projectileSpeed, gravityVec, maxTime)
     maxTime = maxTime or 10
-    if not projectileSpeed or projectileSpeed <= 0 then return nil end
+    if projectileSpeed <= 0 then return nil end
     local r = targetPos - origin
-    local function f(t)
+    local function F(t)
         local term = r + targetVel * t - 0.5 * gravityVec * (t*t)
         local lhs = (projectileSpeed * t) * (projectileSpeed * t)
         local rhs = term:Dot(term)
         return lhs - rhs
     end
+
     local tmin, tmax = 0.01, maxTime
     local step = 0.05
-    local prevT, prevF = nil, nil
-    local foundT = nil
-    local t = tmin
-    prevT = t
-    prevF = f(t)
-    while t < tmax do
-        t = t + step
-        local curF = f(t)
-        if prevF == 0 then foundT = prevT; break end
+    local prevT = tmin
+    local prevF = F(prevT)
+
+    for t = tmin + step, tmax, step do
+        local curF = F(t)
+        if prevF == 0 then
+            prevT = prevT
+            break
+        end
         if prevF * curF < 0 then
             local a, b = prevT, t
             for i=1,28 do
                 local m = (a + b) / 2
-                if f(a) * f(m) <= 0 then b = m else a = m end
+                if F(a) * F(m) <= 0 then b = m else a = m end
             end
-            foundT = (a + b) / 2
+            local foundT = (a + b) / 2
+            if foundT > 0 and foundT <= maxTime then
+                local u = (r + targetVel * foundT - 0.5 * gravityVec * (foundT * foundT)) / foundT
+                local aimPoint = origin + u * foundT
+                return aimPoint
+            end
             break
         end
-        prevT, prevF = t, curF
+        prevT = t
+        prevF = curF
     end
-    if not foundT then return nil end
-    if foundT <= 0 or foundT > maxTime then return nil end
-    local u = (r + targetVel * foundT - 0.5 * gravityVec * (foundT * foundT)) / foundT
-    local aimPoint = origin + u * foundT
-    return aimPoint
+    return nil
 end
 
--- highlights
+-- HIGHLIGHT helpers
 local function clearCharHighlight()
     if charHighlight and charHighlight.Parent then pcall(function() charHighlight:Destroy() end) end
     charHighlight = nil
 end
-
 local function clearVehicleHighlights()
     if vehicleHighlightModel and vehicleHighlightModel.Parent then pcall(function() vehicleHighlightModel:Destroy() end) end
     vehicleHighlightModel = nil
@@ -536,10 +513,8 @@ end
 
 local function colorForDistance(dist, currentMode)
     local cfg = MODE_CONFIG[currentMode] or MODE_CONFIG["General"]
-    local orange = cfg.TIER_ORANGE
-    local close = cfg.TIER_CLOSE
-    if dist >= orange then return Color3.fromRGB(255,0,0), "far"
-    elseif dist >= close then return Color3.fromRGB(255,165,0), "mid"
+    if dist >= cfg.TIER_ORANGE then return Color3.fromRGB(255,0,0), "far"
+    elseif dist >= cfg.TIER_CLOSE then return Color3.fromRGB(255,165,0), "mid"
     else return Color3.fromRGB(0,200,0), "close" end
 end
 
@@ -550,8 +525,10 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     local targetChanged = (targetPlayer ~= lastTarget)
     local tierChanged = (tier ~= lastColorTier)
     if not targetChanged and not tierChanged then return end
+
     clearCharHighlight(); clearVehicleHighlights()
     lastTarget = targetPlayer; lastColorTier = tier
+
     if not targetPlayer or not targetPlayer.Character then
         pcall(function() vehicleLabel.Text = "Vehicle: N/A | HP: N/A" end)
         pcall(function() velocityLabel.Text = "Velocity: N/A" end)
@@ -560,6 +537,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
         if dangerLabel then pcall(function() dangerLabel.Visible = false end) end
         return
     end
+
     local ok, chHl = pcall(function()
         local h = Instance.new("Highlight")
         h.Adornee = targetPlayer.Character
@@ -569,6 +547,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
         return h
     end)
     if ok and chHl and chHl.Parent then charHighlight = chHl end
+
     local hum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
     local seat = hum and hum.SeatPart
     if seat then
@@ -581,6 +560,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
             applyVehicleHighlight(vehicleModel, color)
         end
     end
+
     pcall(function()
         if hpVal then
             vehicleLabel.Text = string.format("Vehicle: %s | HP: %d", vehicleModelName or "N/A", hpVal)
@@ -588,8 +568,10 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
             vehicleLabel.Text = string.format("Vehicle: %s | HP: N/A", vehicleModelName or "N/A")
         end
     end)
+
     if crosshair then pcall(function() crosshair.ImageColor3 = color end) end
     if aiLabel then pcall(function() aiLabel.Visible = enabled end) end
+
     local cfg = MODE_CONFIG[currentMode] or MODE_CONFIG["General"]
     if distance and distance < cfg.TIER_ORANGE then
         if dangerLabel then pcall(function() dangerLabel.Visible = true end) end
@@ -600,14 +582,16 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     end
 end
 
--- UI build
+-- UI BUILD (column)
+local UI_WIDTH = 160
+local X_OFFSET = 20
+local Y_OFFSET = 120
+local GAP = 4
+
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "AutoLockToggleGui"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = playerGui
-
-local GAP_UI = 2
-local INFO_HEIGHT = 56
 
 local toggleBtn = Instance.new("TextButton")
 toggleBtn.Name = "AutoLockToggleBtn"
@@ -632,8 +616,8 @@ indicator.Parent = toggleBtn
 
 local infoFrame = Instance.new("Frame")
 infoFrame.Name = "AutoLockInfo"
-infoFrame.Size = UDim2.new(0, UI_WIDTH, 0, INFO_HEIGHT)
-infoFrame.Position = UDim2.new(0, X_OFFSET, 0, Y_OFFSET + toggleBtn.Size.Y.Offset + GAP_UI)
+infoFrame.Size = UDim2.new(0, UI_WIDTH, 0, 56)
+infoFrame.Position = UDim2.new(0, X_OFFSET, 0, Y_OFFSET + toggleBtn.Size.Y.Offset + GAP)
 infoFrame.BackgroundTransparency = 0.08
 infoFrame.BackgroundColor3 = Color3.fromRGB(40,40,40)
 infoFrame.BorderSizePixel = 0
@@ -678,7 +662,7 @@ velocityLabel.Parent = infoFrame
 local modeBtn = Instance.new("TextButton")
 modeBtn.Name = "ModeToggle"
 modeBtn.Size = UDim2.new(0, UI_WIDTH, 0, 28)
-modeBtn.Position = UDim2.new(0, X_OFFSET, 0, Y_OFFSET + toggleBtn.Size.Y.Offset + GAP_UI + infoFrame.Size.Y.Offset + GAP_UI)
+modeBtn.Position = UDim2.new(0, X_OFFSET, 0, Y_OFFSET + toggleBtn.Size.Y.Offset + GAP + infoFrame.Size.Y.Offset + GAP)
 modeBtn.Font = Enum.Font.SourceSans
 modeBtn.TextSize = 14
 modeBtn.Text = "Mode: " .. mode
@@ -733,30 +717,30 @@ aiLabel.Visible = false
 aiLabel.Parent = screenGui
 
 pcall(function()
-    dangerLabel.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
     aiLabel.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+    dangerLabel.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
 end)
 
--- UI drag
-local draggingBtn = false
+-- dragging behavior (whole column)
+local dragging = false
 local dragInput, dragStart, startTogglePos, startInfoPos, startModePos, startPriorityPos, startBulletPos
 toggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        draggingBtn = true
+        dragging = true
         dragStart = input.Position
         startTogglePos = toggleBtn.Position
         startInfoPos = infoFrame.Position
         startModePos = modeBtn.Position
         startPriorityPos = priorityBtn.Position
         startBulletPos = bulletBtn.Position
-        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingBtn = false end end)
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
     end
 end)
 toggleBtn.InputChanged:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
 end)
 UIS.InputChanged:Connect(function(input)
-    if input == dragInput and draggingBtn and dragStart and startTogglePos then
+    if input == dragInput and dragging and dragStart and startTogglePos then
         local delta = input.Position - dragStart
         toggleBtn.Position = UDim2.new(startTogglePos.X.Scale, startTogglePos.X.Offset + delta.X, startTogglePos.Y.Scale, startTogglePos.Y.Offset + delta.Y)
         infoFrame.Position = UDim2.new(startInfoPos.X.Scale, startInfoPos.X.Offset + delta.X, startInfoPos.Y.Scale, startInfoPos.Y.Offset + delta.Y)
@@ -766,23 +750,23 @@ UIS.InputChanged:Connect(function(input)
     end
 end)
 
--- sounds
+-- Sounds
 local warnSound = Instance.new("Sound"); warnSound.Parent = screenGui
 warnSound.Name = "AutoLockWarning"; warnSound.SoundId = WARNING_SOUND_ID; warnSound.Volume = 2; warnSound.Looped = false
 
 local predictiveSound = Instance.new("Sound"); predictiveSound.Parent = screenGui
-predictiveSound.Name = "AutoLockPredictive"; predictiveSound.SoundId = PREDICTIVE_SOUND_ID; predictiveSound.Volume = 1.5; predictiveSound.Looped = false
+predictiveSound.Name = "AutoLockPredictive"; predictiveSound.SoundId = PREDICTIVE_SOUND_ID; predictiveSound.Volume = PREDICTIVE_VOLUME; predictiveSound.Looped = false
 
 local criticalSound = Instance.new("Sound"); criticalSound.Parent = screenGui
-criticalSound.Name = "AutoLockCritical"; criticalSound.SoundId = CRITICAL_SOUND_ID; criticalSound.Volume = 1; criticalSound.Looped = true
+criticalSound.Name = "AutoLockCritical"; criticalSound.SoundId = CRITICAL_SOUND_ID; criticalSound.Volume = CRITICAL_VOLUME; criticalSound.Looped = true
 
--- buttons
+-- Mode cycling
 local modeOrder = { "Anti-air", "Anti-ship", "General" }
 local function cycleMode()
-    local i = 1
-    for idx,m in ipairs(modeOrder) do if m == mode then i = idx; break end end
-    i = (i % #modeOrder) + 1
-    mode = modeOrder[i]
+    local idx = 1
+    for i,m in ipairs(modeOrder) do if m == mode then idx = i; break end end
+    idx = (idx % #modeOrder) + 1
+    mode = modeOrder[idx]
     modeBtn.Text = "Mode: " .. mode
     if mode ~= "Anti-ship" then
         priorityIndex = 1
@@ -794,8 +778,9 @@ local function cycleMode()
         bulletBtn.Text = "Bullet Type: " .. bulletTypeName
     end
     aiLabel.Text = "Sentry Mode: " .. mode
-    if mode == "Anti-ship" then aiLabel.TextColor3 = Color3.fromRGB(255,140,0) elseif mode == "Anti-air" then aiLabel.TextColor3 = Color3.fromRGB(0,120,255) else aiLabel.TextColor3 = Color3.fromRGB(255,0,0) end
-    modeBtn.Text = "Mode: " .. mode
+    if mode == "Anti-ship" then aiLabel.TextColor3 = Color3.fromRGB(255,140,0)
+    elseif mode == "Anti-air" then aiLabel.TextColor3 = Color3.fromRGB(0,120,255)
+    else aiLabel.TextColor3 = Color3.fromRGB(255,0,0) end
 end
 modeBtn.MouseButton1Click:Connect(cycleMode)
 
@@ -816,15 +801,16 @@ bulletBtn.MouseButton1Click:Connect(function()
         return
     end
     if bulletTypeName == "Battleship" then bulletTypeName = "Normal" else bulletTypeName = "Battleship" end
-    bulletBtn.Text = "Bullet Type: " .. (bulletTypeName or "N/A")
+    bulletBtn.Text = "Bullet Type: " .. bulletTypeName
 end)
 
+-- visuals
 local function updateButtonVisual()
     toggleBtn.Text = enabled and "AutoLock: ON" or "AutoLock: OFF"
     indicator.BackgroundColor3 = enabled and Color3.fromRGB(50,200,50) or Color3.fromRGB(200,50,50)
 end
 
--- main lock
+-- MAIN LOCK LOOP
 local function startLock()
     if lockConn then lockConn:Disconnect() end
     enabled = true; updateButtonVisual()
@@ -872,6 +858,7 @@ local function startLock()
         else
             target, distVal = nearestAntiShipTarget(origin)
         end
+
         currentTarget = target
 
         if currentTarget then
@@ -886,13 +873,16 @@ local function startLock()
                 if dist <= cfg.PREDICTIVE_RANGE then
                     if mode == "Anti-ship" then shouldPredict = true
                     elseif mode == "Anti-air" then
-                        local inPlane = (select(1, isPlayerInPlane(currentTarget)))
-                        if inPlane then shouldPredict = true else shouldPredict = (dist <= cfg.PREDICTIVE_RANGE) end
+                        local inPlane = false
+                        local okSeat, veh = pcall(function() return isPlayerSeated(currentTarget) end)
+                        if okSeat then inPlane, veh = isPlayerSeated(currentTarget) end
+                        if inPlane and veh and nameIsPlane(veh) then shouldPredict = true else shouldPredict = (dist <= cfg.PREDICTIVE_RANGE) end
                     else
                         shouldPredict = (dist <= cfg.PREDICTIVE_RANGE)
                     end
                 end
 
+                -- predictive sound logic
                 if shouldPredict then
                     if currentTarget ~= lastPredictTarget and dist <= cfg.PREDICTIVE_RANGE then
                         pcall(function() predictiveSound:Stop(); predictiveSound:Play() end)
@@ -902,6 +892,7 @@ local function startLock()
                 end
 
                 local targetVel, fallbackSpeed = getTargetVelocityAndFallbackSpeed(currentTarget)
+
                 if shouldPredict then
                     if mode == "Anti-ship" then
                         local bt = BULLET_TYPES[bulletTypeName] or BULLET_TYPES["Battleship"]
@@ -912,7 +903,7 @@ local function startLock()
                         local intercept = computeInterceptPointWithGravity(origin, targetPos, targetVel, s, netG, 20)
                         if intercept then aimPoint = intercept else aimPoint = targetPos + targetVel * 0.25 end
                     else
-                        local s = 800
+                        local s = cfg.DEFAULT_PROJECTILE_SPEED or 800
                         local intercept = computeInterceptPointNoGravity(origin, targetPos, targetVel, s)
                         if intercept then aimPoint = intercept else aimPoint = targetPos + targetVel * 0.25 end
                     end
@@ -926,8 +917,10 @@ local function startLock()
 
                 pcall(function() distLabel.Text = string.format("Enemy distance: %.1f studs", dist) end)
                 if fallbackSpeed and type(fallbackSpeed) == "number" then pcall(function() velocityLabel.Text = string.format("Velocity: %.1f studs/s", fallbackSpeed) end) else pcall(function() velocityLabel.Text = "Velocity: N/A" end) end
+
                 setHighlightsIfNeeded(currentTarget, dist, mode)
 
+                -- danger / warning logic
                 if (mode == "Anti-air" or mode == "Anti-ship") and dist < cfg.TIER_ORANGE and enabled then
                     local now = tick()
                     if not isInDanger then
@@ -940,21 +933,21 @@ local function startLock()
                     isInDanger = false
                 end
 
+                -- critical logic (only Anti-air has looping critical)
                 if mode == "Anti-air" and cfg.CRITICAL_SOUND and enabled and dist < cfg.TIER_CLOSE then
                     if not isInCritical then
                         isInCritical = true
                         pcall(function() criticalSound:Stop(); criticalSound:Play() end)
                     else
-                        if not criticalSound.IsPlaying then pcall(function() criticalSound:Play() end) end
+                        if criticalSound.IsPlaying == false then pcall(function() criticalSound:Play() end) end
                     end
                 else
                     if isInCritical then isInCritical = false; pcall(function() criticalSound:Stop() end) end
                 end
 
-                -- end of target processing inside RenderStepped
                 return
             else
-                -- target invalid: clear and continue
+                -- invalid target: clear and continue
                 currentTarget = nil
                 clearCharHighlight(); clearVehicleHighlights()
                 if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
@@ -966,13 +959,9 @@ local function startLock()
             end
         end
 
-        -- no target: reset camera & UI
+        -- no current target: clear states
         cam.CameraType = Enum.CameraType.Custom
-        pcall(function()
-            distLabel.Text = "Enemy distance: N/A"
-            vehicleLabel.Text = "Vehicle: N/A | HP: N/A"
-            velocityLabel.Text = "Velocity: N/A"
-        end)
+        pcall(function() distLabel.Text = "Enemy distance: N/A"; vehicleLabel.Text = "Vehicle: N/A | HP: N/A"; velocityLabel.Text = "Velocity: N/A" end)
         clearCharHighlight(); clearVehicleHighlights()
         if crosshair then pcall(function() crosshair.ImageColor3 = Color3.new(1,1,1) end) end
         aiLabel.Visible = false; dangerLabel.Visible = false
@@ -980,27 +969,17 @@ local function startLock()
         if isInCritical then isInCritical = false; pcall(function() criticalSound:Stop() end) end
         lastPredicting = false
         lastPredictTarget = nil
-    end) -- end RunService.RenderStepped:Connect
+    end)
+end
 
-end -- end function startLock
-
--- stopLock function
 local function stopLock()
-    if lockConn then
-        lockConn:Disconnect()
-        lockConn = nil
-    end
+    if lockConn then lockConn:Disconnect(); lockConn = nil end
     enabled = false
     currentTarget = nil
     updateButtonVisual()
     clearCharHighlight(); clearVehicleHighlights()
     pcall(function() vehicleLabel.Text = "Vehicle: N/A | HP: N/A" end)
-    if crosshair then
-        pcall(function()
-            crosshair.ImageTransparency = 0.6
-            crosshair.ImageColor3 = Color3.new(1,1,1)
-        end)
-    end
+    if crosshair then pcall(function() crosshair.ImageTransparency = 0.6; crosshair.ImageColor3 = Color3.new(1,1,1) end) end
     aiLabel.Visible = false; dangerLabel.Visible = false
     pcall(function() player.CameraMode = originalCameraMode or Enum.CameraMode.Classic end)
     cam.CameraType = Enum.CameraType.Custom
@@ -1011,13 +990,8 @@ local function stopLock()
     lastPredictTarget = nil
 end
 
--- toggle button
 toggleBtn.MouseButton1Click:Connect(function()
-    if enabled then
-        stopLock()
-    else
-        startLock()
-    end
+    if enabled then stopLock() else startLock() end
 end)
 
 -- respawn handling
@@ -1025,26 +999,15 @@ player.CharacterAdded:Connect(function()
     task.wait(0.05)
     refreshCrosshair()
     aiLabel.Text = "Sentry Mode: " .. mode
-    if enabled then
-        pcall(function() player.CameraMode = Enum.CameraMode.LockFirstPerson end)
-        if crosshair then pcall(function() crosshair.ImageTransparency = 0.3 end) end
-        aiLabel.Visible = true
-    end
+    if enabled then pcall(function() player.CameraMode = Enum.CameraMode.LockFirstPerson end); if crosshair then pcall(function() crosshair.ImageTransparency = 0.3 end) end; aiLabel.Visible = true end
 end)
 
--- cleanup on leaving
-Players.PlayerRemoving:Connect(function(rem)
-    if rem == player then
-        stopLock()
-    end
-end)
+Players.PlayerRemoving:Connect(function(rem) if rem == player then stopLock() end end)
 
--- init UI state
+-- init
 refreshCrosshair()
 updateButtonVisual()
 aiLabel.Text = "Sentry Mode: " .. mode
-pcall(function()
-    aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0)
-        or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0))
-end)
+pcall(function() aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0) or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0)) end)
 
+return
