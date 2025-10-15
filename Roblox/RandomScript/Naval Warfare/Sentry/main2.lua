@@ -1,5 +1,5 @@
--- Version 1.33
--- AutoLock — full LocalScript with targeted vehicle/HP + danger fixes
+-- Version 1.34
+-- AutoLock — full LocalScript with anti-air infantry-seat fix (v1.34)
 -- Place in StarterPlayer -> StarterPlayerScripts
 
 local Players = game:GetService("Players")
@@ -67,6 +67,7 @@ local lastPredictTarget = nil
 
 local crosshair = nil
 
+-- FIND/CENTER CROSSHAIR
 local function findAimInPlayerGui()
     for _,inst in ipairs(playerGui:GetDescendants()) do
         if inst.Name == "Aim" and (inst:IsA("ImageLabel") or inst:IsA("ImageButton")) then
@@ -103,6 +104,7 @@ playerGui.DescendantAdded:Connect(function(desc)
     end
 end)
 
+-- SPATIAL HELPERS
 local function getCharacterHeadPos(ch)
     if not ch then return nil end
     local head = ch:FindFirstChild("Head")
@@ -194,6 +196,7 @@ local function isVehicleDead(vehicle)
     return false, nil
 end
 
+-- TARGET SELECTION
 local function validTargetGeneral(p)
     if not p or p == player then return false end
     if p.Team == player.Team then return false end
@@ -223,6 +226,7 @@ local function nearestEnemy(origin)
     return nearest, bestDist
 end
 
+-- FIXED: Anti-air target selection now excludes players who are seated (in non-plane vehicles)
 local function nearestAntiAirTarget(origin)
     local nearest, bestDist = nil, math.huge
     for _,plr in ipairs(Players:GetPlayers()) do
@@ -234,13 +238,15 @@ local function nearestAntiAirTarget(origin)
                     local headPos = getCharacterHeadPos(ch)
                     if headPos then
                         local dist = (headPos - origin).Magnitude
+                        local seat = hum.SeatPart
                         local inPlane, vehicleModel = isPlayerInPlane(plr)
                         local eligible = false
                         if inPlane then
                             local dead, _ = isVehicleDead(vehicleModel)
                             if not dead then eligible = true end
                         else
-                            if dist <= INFANTRY_RANGE then eligible = true end
+                            -- only treat as infantry if NOT seated (i.e., on-foot)
+                            if not seat and dist <= INFANTRY_RANGE then eligible = true end
                         end
                         if eligible and dist < bestDist then bestDist, nearest = dist, plr end
                     end
@@ -251,9 +257,11 @@ local function nearestAntiAirTarget(origin)
     return nearest, bestDist
 end
 
+-- Returns nearest enemy but skip players whose vehicle HP is <= 0 if they're seated
 local function nearestEnemyWithVehicleHP(origin)
     local nearest, bestDist = nil, math.huge
-    for _,plr in ipairs(Players:GetPlayers()) do
+
+    for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= player and plr.Team ~= player.Team then
             local ch = plr.Character
             if ch then
@@ -264,7 +272,7 @@ local function nearestEnemyWithVehicleHP(origin)
                         local seated, vehicle = isPlayerSeated(plr)
                         local skip = false
                         if seated and vehicle then
-                            local dead, _ = isVehicleDead(vehicle)
+                            local dead, hpv = isVehicleDead(vehicle)
                             if dead then skip = true end
                         end
                         if not skip then
@@ -276,13 +284,16 @@ local function nearestEnemyWithVehicleHP(origin)
             end
         end
     end
+
     return nearest, bestDist
 end
 
+-- Returns the nearest player riding a ship (respecting priorityIndex / SHIP_PRIORITY_ORDER)
 local function nearestAntiShipTarget(origin)
     local prefer = SHIP_PRIORITY_ORDER[priorityIndex]
     local candidates = {}
-    for _,plr in ipairs(Players:GetPlayers()) do
+
+    for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= player and plr.Team ~= player.Team then
             local ch = plr.Character
             if ch then
@@ -292,7 +303,7 @@ local function nearestAntiShipTarget(origin)
                     if headPos then
                         local seated, vehicle = isPlayerSeated(plr)
                         if seated and vehicle and isShipExact(vehicle) then
-                            local dead, _ = isVehicleDead(vehicle)
+                            local dead, hpv = isVehicleDead(vehicle)
                             if not dead then
                                 local ok, nm = pcall(function() return tostring(vehicle.Name or "") end)
                                 nm = (ok and nm) or ""
@@ -304,14 +315,18 @@ local function nearestAntiShipTarget(origin)
             end
         end
     end
+
+    -- pick by priority (if priority != "N/A" try to find that; otherwise any)
     local best, bestDist = nil, math.huge
     if prefer ~= "N/A" then
+        -- first try to find a candidate whose vehicle name exactly equals preferred token
         for _, cand in ipairs(candidates) do
             if cand.name == prefer then
                 local d = (cand.pos - origin).Magnitude
                 if d < bestDist then bestDist, best = d, cand.player end
             end
         end
+        -- if none matched exact preference, fall back to nearest among all candidates
         if not best then
             for _, cand in ipairs(candidates) do
                 local d = (cand.pos - origin).Magnitude
@@ -319,14 +334,17 @@ local function nearestAntiShipTarget(origin)
             end
         end
     else
+        -- no preference, just nearest candidate
         for _, cand in ipairs(candidates) do
             local d = (cand.pos - origin).Magnitude
             if d < bestDist then bestDist, best = d, cand.player end
         end
     end
+
     return best, (best and bestDist) or math.huge
 end
 
+-- VELOCITY & CACHE
 local function updatePositionCache(origin)
     local now = tick()
     for _,plr in ipairs(Players:GetPlayers()) do
@@ -410,6 +428,7 @@ local function getTargetVelocityAndFallbackSpeed(targetPlayer)
     return Vector3.new(0,0,0), nil
 end
 
+-- INTERCEPT MATH
 local function computeInterceptPointNoGravity(origin, targetPos, targetVel, projectileSpeed)
     if not projectileSpeed or projectileSpeed <= 0 then return nil end
     local r = targetPos - origin
@@ -475,6 +494,7 @@ local function computeInterceptPointWithGravity(origin, targetPos, targetVel, pr
     return aimPoint
 end
 
+-- HIGHLIGHTS
 local function clearCharHighlight()
     if charHighlight and charHighlight.Parent then pcall(function() charHighlight:Destroy() end) end
     charHighlight = nil
@@ -528,13 +548,9 @@ local function colorForDistance(dist, currentMode)
     local cfg = MODE_CONFIG[currentMode] or MODE_CONFIG["General"]
     local orange = cfg.TIER_ORANGE
     local close = cfg.TIER_CLOSE
-    if dist >= orange then
-        return Color3.fromRGB(255,0,0), "far"
-    elseif dist >= close then
-        return Color3.fromRGB(255,165,0), "mid"
-    else
-        return Color3.fromRGB(0,200,0), "close"
-    end
+    if dist >= orange then return Color3.fromRGB(255,0,0), "far"
+    elseif dist >= close then return Color3.fromRGB(255,165,0), "mid"
+    else return Color3.fromRGB(0,200,0), "close" end
 end
 
 local function detectVehicleModelForPlayer(plr)
@@ -655,6 +671,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
         return
     end
 
+    -- always update vehicle name & HP text (so HP changes are reflected)
     pcall(function()
         if hpVal ~= nil then
             vehicleLabel.Text = string.format("Vehicle: %s | HP: %d", vehicleModelName or "N/A", hpVal)
@@ -666,6 +683,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     if crosshair then pcall(function() crosshair.ImageColor3 = color end) end
     if aiLabel then pcall(function() aiLabel.Visible = enabled end) end
 
+    -- danger label logic: always update visibility & color according to current distance
     local cfg = MODE_CONFIG[currentMode] or MODE_CONFIG["General"]
     if distance and distance < cfg.TIER_ORANGE then
         if dangerLabel then pcall(function() dangerLabel.Visible = true end) end
@@ -679,7 +697,7 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     lastVehicleHP = hpVal
 end
 
--- UI build
+-- UI BUILD (unchanged layout)
 local UI_WIDTH = 160
 local X_OFFSET = 20
 local Y_OFFSET = 120
@@ -819,6 +837,7 @@ pcall(function()
     aiLabel.FontFace = Font.new("rbxasset://fonts/families/SourceSansPro.json", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
 end)
 
+-- drag UI
 local draggingBtn = false
 local dragInput, dragStart, startTogglePos, startInfoPos, startModePos, startPriorityPos, startBulletPos
 toggleBtn.InputBegan:Connect(function(input)
@@ -847,6 +866,7 @@ UIS.InputChanged:Connect(function(input)
     end
 end)
 
+-- sounds
 local warnSound = Instance.new("Sound"); warnSound.Parent = screenGui
 warnSound.Name = "AutoLockWarning"; warnSound.SoundId = WARNING_SOUND_ID; warnSound.Volume = 2; warnSound.Looped = false
 
@@ -856,6 +876,7 @@ predictiveSound.Name = "AutoLockPredictive"; predictiveSound.SoundId = PREDICTIV
 local criticalSound = Instance.new("Sound"); criticalSound.Parent = screenGui
 criticalSound.Name = "AutoLockCritical"; criticalSound.SoundId = CRITICAL_SOUND_ID; criticalSound.Volume = CRITICAL_VOLUME; criticalSound.Looped = true
 
+-- UI interactions
 local modeOrder = { "Anti-air", "Anti-ship", "General" }
 local function cycleMode()
     local i = 1
@@ -904,7 +925,7 @@ local function updateButtonVisual()
     indicator.BackgroundColor3 = enabled and Color3.fromRGB(50,200,50) or Color3.fromRGB(200,50,50)
 end
 
--- NEW minimal vehicle info updater (calls only to update the vehicle label each frame)
+-- MINIMAL VEHICLE LABEL UPDATER (called every frame for the current target)
 local function updateVehicleInfoEveryFrame(targetPlayer)
     if not targetPlayer or not targetPlayer.Character then
         pcall(function() vehicleLabel.Text = "Vehicle: N/A | HP: N/A" end)
@@ -1110,7 +1131,7 @@ local function startLock()
                         if now - lastWarningTime >= WARNING_INTERVAL then lastWarningTime = now; pcall(function() warnSound:Stop(); warnSound:Play() end) end
                     end
 
-                    -- ensure danger indicator is shown (added per patch)
+                    -- ensure danger indicator is shown
                     local _, tier = colorForDistance(dist, mode)
                     pcall(function()
                         dangerLabel.Visible = true
@@ -1168,6 +1189,7 @@ end)
 
 Players.PlayerRemoving:Connect(function(rem) if rem == player then stopLock() end end)
 
+-- init
 refreshCrosshair()
 updateButtonVisual()
 aiLabel.Text = "Sentry Mode: " .. mode
