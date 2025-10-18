@@ -1392,31 +1392,4 @@ aiLabel.Text = "Sentry Mode: " .. mode
 pcall(function()
     aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0)
         or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0))
-end) Type: " .. bulletTypeName
 end)
-
-toggleBtn.MouseButton1Click:Connect(function() if enabled then stopLock() else startLock() end end)
-
-player.CharacterAdded:Connect(function()
-    task.wait(0.05)
-    refreshCrosshair()
-    aiLabel.Text = "Sentry Mode: " .. mode
-    if enabled then
-        pcall(function() player.CameraMode = Enum.CameraMode.LockFirstPerson end)
-        if crosshair then pcall(function() crosshair.ImageTransparency = 0.3 end) end
-        aiLabel.Visible = true
-    end
-    -- recreate/reparent hitIndicator (game may recreate Aim)
-    createOrRefreshHitIndicator()
-    setHitIndicatorParentAndMatchCrosshair()
-    if hitIndicator then hitIndicator.Visible = false end
-    lastKnownVehicleHPs = {}
-end)
-
-Players.PlayerRemoving:Connect(function(rem) if rem == player then stopLock() end end)
-
--- init
-refreshCrosshair()
-updateButtonVisual()
-aiLabel.Text = "Sentry Mode: " .. mode
-pcall(function() aiLabel.TextColor3 = (mode == "Anti-ship") and Color3.fromRGB(255,140,0) or ((mode == "Anti-air") and Color3.fromRGB(0,120,255) or Color3.fromRGB(255,0,0)) end)
