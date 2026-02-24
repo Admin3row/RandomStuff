@@ -74,6 +74,10 @@ local crosshair = nil
 local hitIndicator = nil
 local hitSound = nil
 
+-- Auto-defend state (v1.38)
+local autoDefendEnabled = false
+local lastSentAutoDefendState = nil -- nil / true / false
+
 local lastKnownVehicleHPs = {} -- map player -> last HP value (for hit detection)
 
 -- UI BUILD (create our primary GUI so we always have a parent fallback)
@@ -193,6 +197,34 @@ bulletBtn.TextColor3 = Color3.fromRGB(220,220,220)
 bulletBtn.BorderSizePixel = 0
 bulletBtn.Parent = screenGui
 
+-- Auto-defend toggle button (Anti-air only)
+-- Auto-defend toggle button (Anti-air only) — updated (follows drag & colored ON/OFF)
+local autoDefendBtn = Instance.new("TextButton")
+autoDefendBtn.Name = "AutoDefendBtn"
+autoDefendBtn.Size = UDim2.new(0, UI_WIDTH, 0, 26)
+autoDefendBtn.Position = UDim2.new(0, X_OFFSET, 0, bulletBtn.Position.Y.Offset + bulletBtn.Size.Y.Offset + 6)
+autoDefendBtn.Font = Enum.Font.SourceSans
+autoDefendBtn.TextSize = 13
+autoDefendBtn.RichText = true
+autoDefendBtn.Text = "Auto defend: <font color=\"#FF0000\">OFF</font>"
+autoDefendBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+autoDefendBtn.TextColor3 = Color3.fromRGB(220,220,220) -- label text base (ON/OFF use RichText colors)
+autoDefendBtn.BorderSizePixel = 0
+autoDefendBtn.Parent = screenGui
+autoDefendBtn.Visible = (mode == "Anti-air") -- show only for Anti-air initially
+
+-- toggle handler: update RichText ON/OFF coloring & ensure server state
+autoDefendBtn.MouseButton1Click:Connect(function()
+    autoDefendEnabled = not autoDefendEnabled
+    if autoDefendEnabled then
+        autoDefendBtn.Text = "Auto defend: <font color=\"#00FF00\">ON</font>"
+        sendAutoDefendState(true)
+    else
+        autoDefendBtn.Text = "Auto defend: <font color=\"#FF0000\">OFF</font>"
+        sendAutoDefendState(false)
+    end
+end)
+
 local dangerLabel = Instance.new("TextLabel")
 dangerLabel.Name = "DangerIndicator"
 dangerLabel.AnchorPoint = Vector2.new(0.5,0.5)
@@ -309,7 +341,7 @@ end
 -- DRAGGING UI
 local draggingBtn = false
 local dragInput, dragStart
-local startTogglePos, startInfoPos, startModePos, startPriorityPos, startBulletPos
+local startTogglePos, startInfoPos, startModePos, startPriorityPos, startBulletPos, startAutoDefendPos -- for dragging the autoDefendBtn with the UI
 toggleBtn.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         draggingBtn = true
@@ -319,6 +351,7 @@ toggleBtn.InputBegan:Connect(function(input)
         startModePos = modeBtn.Position
         startPriorityPos = priorityBtn.Position
         startBulletPos = bulletBtn.Position
+        startAutoDefendPos = autoDefendBtn and autoDefendBtn.Position or nil
         input.Changed:Connect(function()
             if input.UserInputState == Enum.UserInputState.End then
                 draggingBtn = false
@@ -334,11 +367,23 @@ end)
 UIS.InputChanged:Connect(function(input)
     if input == dragInput and draggingBtn and dragStart and startTogglePos then
         local delta = input.Position - dragStart
-        toggleBtn.Position = UDim2.new(startTogglePos.X.Scale, startTogglePos.X.Offset + delta.X, startTogglePos.Y.Scale, startTogglePos.Y.Offset + delta.Y)
-        infoFrame.Position = UDim2.new(startInfoPos.X.Scale, startInfoPos.X.Offset + delta.X, startInfoPos.Y.Scale, startInfoPos.Y.Offset + delta.Y)
-        modeBtn.Position = UDim2.new(startModePos.X.Scale, startModePos.X.Offset + delta.X, startModePos.Y.Scale, startModePos.Y.Offset + delta.Y)
-        priorityBtn.Position = UDim2.new(startPriorityPos.X.Scale, startPriorityPos.X.Offset + delta.X, startPriorityPos.Y.Scale, startPriorityPos.Y.Offset + delta.Y)
-        bulletBtn.Position = UDim2.new(startBulletPos.X.Scale, startBulletPos.X.Offset + delta.X, startBulletPos.Y.Scale, startBulletPos.Y.Offset + delta.Y)
+
+        toggleBtn.Position = UDim2.new(startTogglePos.X.Scale, startTogglePos.X.Offset + delta.X,
+                                       startTogglePos.Y.Scale, startTogglePos.Y.Offset + delta.Y)
+        infoFrame.Position = UDim2.new(startInfoPos.X.Scale, startInfoPos.X.Offset + delta.X,
+                                       startInfoPos.Y.Scale, startInfoPos.Y.Offset + delta.Y)
+        modeBtn.Position = UDim2.new(startModePos.X.Scale, startModePos.X.Offset + delta.X,
+                                     startModePos.Y.Scale, startModePos.Y.Offset + delta.Y)
+        priorityBtn.Position = UDim2.new(startPriorityPos.X.Scale, startPriorityPos.X.Offset + delta.X,
+                                          startPriorityPos.Y.Scale, startPriorityPos.Y.Offset + delta.Y)
+        bulletBtn.Position = UDim2.new(startBulletPos.X.Scale, startBulletPos.X.Offset + delta.X,
+                                       startBulletPos.Y.Scale, startBulletPos.Y.Offset + delta.Y)
+
+        -- move the autoDefend button together with other UI (only if we have a recorded start position)
+        if autoDefendBtn and startAutoDefendPos then
+            autoDefendBtn.Position = UDim2.new(startAutoDefendPos.X.Scale, startAutoDefendPos.X.Offset + delta.X,
+                                               startAutoDefendPos.Y.Scale, startAutoDefendPos.Y.Offset + delta.Y)
+        end
     end
 end)
 
@@ -1083,6 +1128,16 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     lastVehicleHP = hpVal
 end
 
+-- safe send to server for Auto-defend (only fire when state changes)
+local function sendAutoDefendState(on)
+    if lastSentAutoDefendState == on then return end
+    lastSentAutoDefendState = on
+    pcall(function()
+        local args = { "shoot", { on } }
+        game:GetService("ReplicatedStorage"):WaitForChild("Event"):FireServer(unpack(args))
+    end)
+end
+
 -- MAIN LOOP CONTROL
 local function updateButtonVisual()
     toggleBtn.Text = enabled and "AutoLock: ON" or "AutoLock: OFF"
@@ -1105,6 +1160,8 @@ local function stopLock()
     if isInCritical then isInCritical = false; pcall(function() criticalSound:Stop() end) end
     lastPredicting = false; lastPredictTarget = nil
     lastKnownVehicleHPs = {}
+    -- ensure remote shooting is turned off
+    sendAutoDefendState(false)
 end
 
 local function playPredictiveSoundIfNeeded(dist)
@@ -1259,7 +1316,14 @@ local function startLock()
                 else
                     isInDanger = false
                 end
-
+                -- Auto-defend: only for Anti-air, and only if user enabled the toggle
+                if mode == "Anti-air" then
+                    if enabled and dist < cfg.TIER_ORANGE and autoDefendEnabled then
+                        sendAutoDefendState(true)
+                    else
+                        sendAutoDefendState(false)
+                    end
+                end
                 if mode == "Anti-air" and cfg.CRITICAL_SOUND and enabled and dist < cfg.TIER_CLOSE then
                     if not isInCritical then
                         isInCritical = true
@@ -1350,7 +1414,19 @@ local function cycleMode()
     if mode == "Anti-ship" then aiLabel.TextColor3 = Color3.fromRGB(255,140,0)
     elseif mode == "Anti-air" then aiLabel.TextColor3 = Color3.fromRGB(0,120,255)
     else aiLabel.TextColor3 = Color3.fromRGB(255,0,0) end
+    -- show/hide autoDefend button only in Anti-air
+    -- show/hide autoDefend button only in Anti-air
+    if autoDefendBtn then
+        autoDefendBtn.Visible = (mode == "Anti-air")
+        if mode ~= "Anti-air" then
+            autoDefendEnabled = false
+            autoDefendBtn.Text = "Auto defend: <font color=\"#FF0000\">OFF</font>"
+            sendAutoDefendState(false)
+        end
+    end
 end
+
+
 modeBtn.MouseButton1Click:Connect(cycleMode)
 
 priorityBtn.MouseButton1Click:Connect(function()
