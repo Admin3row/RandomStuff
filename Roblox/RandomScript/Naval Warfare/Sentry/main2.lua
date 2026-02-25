@@ -1,4 +1,4 @@
--- AutoLock v1.37.4
+-- AutoLock v1.39
 -- Place this LocalScript in StarterPlayer -> StarterPlayerScripts
 
 local Players = game:GetService("Players")
@@ -77,6 +77,10 @@ local hitSound = nil
 -- Auto-defend state (v1.38)
 local autoDefendEnabled = false
 local lastSentAutoDefendState = nil -- nil / true / false
+-- forward declarations (so early calls won't fail)
+local sendAutoDefendState
+local sendAutoDefendPulse
+
 
 local lastKnownVehicleHPs = {} -- map player -> last HP value (for hit detection)
 
@@ -211,7 +215,7 @@ autoDefendBtn.BackgroundColor3 = Color3.fromRGB(40,40,40)
 autoDefendBtn.TextColor3 = Color3.fromRGB(220,220,220) -- label text base (ON/OFF use RichText colors)
 autoDefendBtn.BorderSizePixel = 0
 autoDefendBtn.Parent = screenGui
-autoDefendBtn.Visible = (mode == "Anti-air") -- show only for Anti-air initially
+autoDefendBtn.Visible = true
 
 -- toggle handler: update RichText ON/OFF coloring & ensure server state
 autoDefendBtn.MouseButton1Click:Connect(function()
@@ -410,6 +414,20 @@ criticalSound.Volume = CRITICAL_VOLUME
 criticalSound.Looped = true
 
 -- HELPERS
+local lastAutoDefendPulse = 0
+local AUTO_DEFEND_PULSE_INTERVAL = 0.12 -- tweak if you want faster/slower pulses
+
+sendAutoDefendPulse = function()
+    local now = tick()
+    if now - lastAutoDefendPulse < AUTO_DEFEND_PULSE_INTERVAL then return end
+    lastAutoDefendPulse = now
+    pcall(function()
+        local args = { "shoot", { true } }
+        game:GetService("ReplicatedStorage"):WaitForChild("Event"):FireServer(unpack(args))
+    end)
+end
+
+
 local function centerCrosshair(inst)
     if not inst then return end
     pcall(function()
@@ -1128,8 +1146,8 @@ local function setHighlightsIfNeeded(targetPlayer, distance, currentMode)
     lastVehicleHP = hpVal
 end
 
--- safe send to server for Auto-defend (only fire when state changes)
-local function sendAutoDefendState(on)
+-- assign to forward-declared local (keeps the same behavior)
+sendAutoDefendState = function(on)
     if lastSentAutoDefendState == on then return end
     lastSentAutoDefendState = on
     pcall(function()
@@ -1137,6 +1155,7 @@ local function sendAutoDefendState(on)
         game:GetService("ReplicatedStorage"):WaitForChild("Event"):FireServer(unpack(args))
     end)
 end
+
 
 -- MAIN LOOP CONTROL
 local function updateButtonVisual()
@@ -1316,13 +1335,18 @@ local function startLock()
                 else
                     isInDanger = false
                 end
-                -- Auto-defend: only for Anti-air, and only if user enabled the toggle
-                if mode == "Anti-air" then
-                    if enabled and dist < cfg.TIER_ORANGE and autoDefendEnabled then
-                        sendAutoDefendState(true)
+                -- Auto-defend: apply to all modes if user enabled (or customize per-mode)
+                if autoDefendEnabled and enabled and dist < cfg.TIER_ORANGE then
+                    if mode == "Anti-ship" then
+                        -- pulse for ship turrets (they often require repeated triggering)
+                        sendAutoDefendPulse()
                     else
-                        sendAutoDefendState(false)
+                        -- Normal stateful mode (e.g., Anti-air)
+                        sendAutoDefendState(true)
                     end
+                else
+                    -- explicitly tell server to stop stateful shooting (safe to call)
+                    sendAutoDefendState(false)
                 end
                 if mode == "Anti-air" and cfg.CRITICAL_SOUND and enabled and dist < cfg.TIER_CLOSE then
                     if not isInCritical then
@@ -1417,11 +1441,13 @@ local function cycleMode()
     -- show/hide autoDefend button only in Anti-air
     -- show/hide autoDefend button only in Anti-air
     if autoDefendBtn then
-        autoDefendBtn.Visible = (mode == "Anti-air")
-        if mode ~= "Anti-air" then
-            autoDefendEnabled = false
+        autoDefendBtn.Visible = true -- always visible in all modes
+
+        -- just update color text based on state, don't auto-disable
+        if autoDefendEnabled then
+            autoDefendBtn.Text = "Auto defend: <font color=\"#00FF00\">ON</font>"
+        else
             autoDefendBtn.Text = "Auto defend: <font color=\"#FF0000\">OFF</font>"
-            sendAutoDefendState(false)
         end
     end
 end
